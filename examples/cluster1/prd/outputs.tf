@@ -22,3 +22,8 @@ output "kms_key_arn" {
   description = "KMS key for the secret. Add to terraform-aws-identity external_secrets.kms_key_arns."
   value       = module.database.kms_key_arn
 }
+
+output "read_replica_addresses" {
+  description = "Postgres hostnames for read-only traffic."
+  value       = module.database.read_replica_addresses
+}

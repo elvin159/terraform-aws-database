@@ -86,4 +86,8 @@ module "database" {
   max_allocated_storage = 500
 
   backup_retention_days = 14
+
+  # Read traffic goes to the replica. Backups are copied to us-west-1 for a regional outage.
+  read_replicas      = { read1 = {} }
+  backup_replication = { region = "us-west-1", retention_days = 14 }
 }

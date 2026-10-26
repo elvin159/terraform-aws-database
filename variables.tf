@@ -113,12 +113,18 @@ variable "max_allocated_storage" {
 # Database
 
 variable "database_name" {
-  description = "Name of the database created on the instance for the app."
+  description = "Name of the database created on the instance for the app. Required, except for a cross-region replica, which gets its databases from the source."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9_]{0,62}$", var.database_name))
+    condition     = var.database_name == null || can(regex("^[a-z][a-z0-9_]{0,62}$", var.database_name))
     error_message = "database_name must be 1-63 characters: lowercase letters, digits and underscores, starting with a letter."
+  }
+
+  validation {
+    condition     = (var.database_name == null) == (var.replicate_source_db != null)
+    error_message = "Set database_name for a primary instance. Leave it unset when replicate_source_db is set."
   }
 }
 
@@ -148,6 +154,69 @@ variable "parameters" {
   validation {
     condition     = alltrue([for p in values(var.parameters) : contains(["immediate", "pending-reboot"], p.apply_method)])
     error_message = "parameters apply_method must be immediate or pending-reboot."
+  }
+}
+
+# Replication
+
+variable "replicate_source_db" {
+  description = <<-EOT
+    ARN of an instance in another region to replicate. Makes this instance a cross-region read replica:
+    its databases, master user and secret come from the source, and it has no automated backups.
+    Remove it to promote the replica to a standalone primary (disaster recovery).
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.replicate_source_db == null || can(regex("^arn:aws[a-z-]*:rds:[a-z0-9-]+:[0-9]{12}:db:.+$", var.replicate_source_db))
+    error_message = "replicate_source_db must be an RDS DB instance ARN."
+  }
+}
+
+variable "read_replicas" {
+  description = <<-EOT
+    In-region read replicas of this instance, keyed by a short name. Each is named <name>-<key> and uses
+    this instance's subnets, security group, parameters, KMS key and multi_az setting.
+      instance_class - Defaults to var.instance_class.
+  EOT
+  type = map(object({
+    instance_class = optional(string)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for k in keys(var.read_replicas) : can(regex("^[a-z][a-z0-9]{0,11}$", k))])
+    error_message = "read_replicas keys must be 1-12 characters: lowercase letters and digits, starting with a letter."
+  }
+
+  validation {
+    condition     = length(var.read_replicas) == 0 || var.replicate_source_db == null
+    error_message = "read_replicas can only be created from a primary instance, not a cross-region replica."
+  }
+}
+
+variable "backup_replication" {
+  description = <<-EOT
+    Copy automated backups to another region, so the database can be restored to any point in time there
+    if this region is lost. The module creates a KMS key in that region for the copies.
+      region         - Destination region, e.g. us-west-1.
+      retention_days - Days to keep the copies.
+  EOT
+  type = object({
+    region         = string
+    retention_days = optional(number, 7)
+  })
+  default = null
+
+  validation {
+    condition     = var.backup_replication == null || try(var.backup_replication.retention_days >= 1 && var.backup_replication.retention_days <= 35, false)
+    error_message = "backup_replication.retention_days must be between 1 and 35."
+  }
+
+  validation {
+    condition     = var.backup_replication == null || var.replicate_source_db == null
+    error_message = "backup_replication is set on the primary instance. A cross-region replica has no automated backups."
   }
 }
 
