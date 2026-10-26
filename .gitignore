@@ -1,0 +1,15 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Reusable module: consumers own the lock file. Root configs (examples/) commit theirs.
+/.terraform.lock.hcl
