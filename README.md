@@ -1,6 +1,6 @@
 # terraform-aws-database
 
-Creates one RDS for PostgreSQL instance in one region:
+Creates an RDS for PostgreSQL instance, with optional read replicas in the same region and in other regions:
 
 - **Private only:** runs in the private subnets from `terraform-aws-networking` and is never publicly accessible.
 - **Credentials in Secrets Manager:** RDS generates the master password, stores it in Secrets Manager and rotates it every 7 days. The password never appears in Terraform code, plans or state.
@@ -8,6 +8,7 @@ Creates one RDS for PostgreSQL instance in one region:
 - **Locked-down security group:** inbound on 5432 only from the security groups and CIDRs you list, e.g. the EKS cluster from `terraform-aws-compute`.
 - **Operations:** gp3 storage that grows automatically, automated backups with point-in-time recovery, automatic minor version upgrades in the maintenance window, Postgres logs in CloudWatch Logs, and Performance Insights.
 - **Protection levels**: dev can be torn down, stg is hard to delete, and Terraform can't take prd down.
+- **Read scaling and disaster recovery:** in-region read replicas, cross-region read replicas, and automated backups copied to another region. See [Replication and disaster recovery](#replication-and-disaster-recovery).
 
 ## Environments
 
@@ -74,12 +75,15 @@ The module takes its region from the provider you pass it.
 | `subnet_ids` | required | Private subnets in at least two AZs. |
 | `engine_version` | required | Postgres major version, e.g. `17`. |
 | `instance_class` | required | e.g. `db.t4g.medium`, `db.m7g.large`. |
-| `database_name` | required | Database created for the app. |
+| `database_name` | required for a primary | Database created for the app. Leave unset on a cross-region replica. |
 | `allowed_security_group_ids` | `[]` | Security groups allowed on 5432. |
 | `allowed_cidr_blocks` | `[]` | CIDRs allowed on 5432, e.g. a VPN. `0.0.0.0/0` is rejected. |
 | `multi_az` | `true` | Standby in a second AZ with automatic failover. Turn off in dev only. |
 | `allocated_storage` / `max_allocated_storage` | `20` / `100` | Initial size and autoscaling ceiling, in GiB. Storage never shrinks. |
 | `master_username` | `dbadmin` | The password is managed by RDS. |
+| `read_replicas` | `{}` | In-region read replicas: `{ read1 = { instance_class = optional } }`. Named `<name>-<key>`. Primary only. |
+| `replicate_source_db` | `null` | ARN of an instance in another region. Makes this module call a cross-region read replica. |
+| `backup_replication` | `null` | `{ region = "us-west-1", retention_days = 7 }`: copy automated backups to another region. Primary only. |
 | `parameters` | `{}` | Extra Postgres parameters: `{ name = { value = "...", apply_method = "immediate" \| "pending-reboot" } }`. |
 | `backup_retention_days` | `14` | 1 to 35 days of point-in-time recovery. |
 | `backup_window` / `maintenance_window` | `03:00-04:00` / `sun:05:00-sun:06:00` | UTC. |
@@ -90,7 +94,55 @@ The module takes its region from the provider you pass it.
 
 ### Outputs
 
-`identifier`, `arn`, `address`, `port`, `database_name`, `master_username`, `master_user_secret_arn`, `kms_key_arn`, `security_group_id`.
+`identifier`, `arn`, `address`, `port`, `database_name`, `master_username`, `master_user_secret_arn` (null on a cross-region replica), `kms_key_arn`, `security_group_id`, `read_replica_addresses`, `read_replica_identifiers`, `backup_replication_kms_key_arn`.
+
+## Replication and disaster recovery
+
+One module call per region. The primary region creates the writer and, optionally, in-region read
+replicas and cross-region backup copies. Each other region creates a cross-region read replica of it,
+in that region's own VPC.
+
+```hcl
+# us-east-1: primary
+module "database" {
+  source = "git::https://github.com/<org>/terraform-aws-database.git?ref=v2.0.0"
+
+  name           = "cluster1-prd-use1"
+  # ...network, protection, engine_version, instance_class as usual
+  database_name  = "app"
+
+  read_replicas      = { read1 = {} }                                  # read traffic in this region
+  backup_replication = { region = "us-west-1", retention_days = 14 }  # point-in-time restore in us-west-1
+}
+
+# us-west-1: cross-region read replica, in its own root and state
+module "database" {
+  source = "git::https://github.com/<org>/terraform-aws-database.git?ref=v2.0.0"
+
+  name                = "cluster1-prd-usw1"
+  # ...us-west-1 network, protection, engine_version, instance_class
+  replicate_source_db = data.aws_db_instance.primary.db_instance_arn
+}
+```
+
+Apply the primary region first. A replica:
+
+- uses the source's databases and master user. The master secret stays in the primary region, so apps in
+  the replica region read it from there (`master_user_secret_arn` of the primary).
+- has no automated backups or final snapshot. The primary's backups, and their cross-region copies, cover
+  the data.
+- gets its own KMS key, subnet group, security group and parameter group in its region.
+- can be read only. Point read-only clients at `read_replica_addresses` (in-region) or the replica's
+  `address` (cross-region). Replication is asynchronous, so reads can lag writes slightly; alarm on the
+  `ReplicaLag` metric.
+
+**Losing the primary region:**
+
+- **Promote the replica:** remove `replicate_source_db` and set `database_name` in that region's root,
+  then apply. RDS promotes it to a standalone writer and turns on automated backups. Repoint writers to
+  it. Promotion is one-way.
+- **Or restore from the backup copies** to any point within `backup_replication.retention_days`, if no
+  replica exists.
 
 ## Connecting the app
 
@@ -219,4 +271,4 @@ terraform test
 
 ## Not included
 
-The VPC (`terraform-aws-networking`), the EKS cluster (`terraform-aws-compute`), the External Secrets IRSA role (`terraform-aws-identity`), Postgres roles and schemas inside the database, read replicas, and the CI roles and GitHub OIDC provider are managed elsewhere.
+The VPC (`terraform-aws-networking`), the EKS cluster (`terraform-aws-compute`), the External Secrets IRSA role (`terraform-aws-identity`), Postgres roles and schemas inside the database, and the CI roles and GitHub OIDC provider are managed elsewhere.
